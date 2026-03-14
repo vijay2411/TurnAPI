@@ -1,0 +1,12 @@
+.venv/
+.pytest_cache/
+__pycache__/
+.browser-profile/
+.agent/
+.agents/
+.claude/
+.DS_Store
+copy/
+skills/
+skills-lock.json
+new_code.py

@@ -1,0 +1,31 @@
+# pyproject.toml
+[project]
+name = "consensus-api"
+version = "0.1.0"
+description = "Consensus.app API wrapper with Cloudflare bypass"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "httpx>=0.26.0",
+    "pydantic>=2.5.0",
+    "websockets>=12.0",
+    "python-multipart>=0.0.6",
+    "nodriver>=0.35",
+    "seleniumbase>=4.22.0",
+    "playwright>=1.41.0",
+    "fake-useragent>=1.4.0",
+    "Pillow>=10.2.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.7.0",  # For better CLI output
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.2.0",
+]
+
+[tool.uv]
+python-preference = "only-system"
