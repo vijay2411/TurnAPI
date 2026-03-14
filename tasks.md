@@ -166,6 +166,25 @@ Status:
 Status:
 - completed
 
+### 18. Z.ai target integration
+
+- Inspected the live Brave DOM for the real app at `https://chat.z.ai/`.
+- Identified:
+  - input selector: `textarea`
+  - submit selector: `#send-message-button`
+  - conversation URL model: `/c/<uuid>`
+  - intermediate reasoning container: `thinking-chain-container`
+- Added a dedicated `z.ai` target adapter.
+- Verified live:
+  - fresh session
+  - follow-up by `session_id`
+  - resume by `session_link`
+- Fixed short-answer extraction so one-word and two-word responses are not discarded.
+- Improved attach-mode resume by preferring an already-open matching conversation tab.
+
+Status:
+- completed
+
 ## Current supported features
 
 - browser-backed chat automation
@@ -178,6 +197,7 @@ Status:
 - OpenAI-style compatibility
 - Anthropic-style compatibility
 - optional local UI
+- `chat.z.ai` adapter support
 
 ## Known gaps
 
@@ -186,6 +206,7 @@ Status:
 - Linux-specific launcher polish
 - structured source extraction for every target
 - adapter onboarding automation
+- duplicate open-tab disambiguation can still be refined further for attach mode
 
 ## Repeatable checklist for a new website
 

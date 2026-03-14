@@ -191,6 +191,47 @@ This file records techniques, tools, and approaches tried in this project. A fai
 - Last tried:
   2026-03-15
 
+## Excluding intermediate reasoning containers
+
+- Used for:
+  targets that render a visible thinking/reasoning block before the final answer
+- Result:
+  required for `chat.z.ai`
+- What worked:
+  - excluding `thinking-chain-container` from response extraction
+  - treating that container as progress/loading state, not final content
+- What failed or was brittle:
+  - naive `.markdown` or assistant-container scraping returned reasoning instead of the final answer
+- Last tried:
+  2026-03-15
+
+## Reusing an already-open matching conversation tab
+
+- Used for:
+  resuming stored conversation links in attach mode
+- Result:
+  improved reliability on `chat.z.ai`
+- What worked:
+  - when the exact `session_link` was already open in Brave, reusing that live tab was more reliable than opening a fresh duplicate tab
+  - avoids some hydration/race issues on resumed conversations
+- What failed or was brittle:
+  - duplicate tabs with the same URL can exist, so the reuse heuristic has to prefer the latest/open active match
+- Last tried:
+  2026-03-15
+
+## Short-answer extraction thresholds
+
+- Used for:
+  targets that can validly answer with one word or two short words
+- Result:
+  required adjustment for `chat.z.ai`
+- What worked:
+  - lowering the alphabetic-character threshold for the `z.ai` adapter allowed valid outputs like `RED`, `CYAN`, `FOAM`, and `SILENT OCEAN`
+- What failed or was brittle:
+  - generic minimum-length filters can accidentally suppress correct short answers
+- Last tried:
+  2026-03-15
+
 ## Stored remote conversation links
 
 - Used for:

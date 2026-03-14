@@ -28,6 +28,7 @@ from consensus_api import (
     GENERIC_TARGET_ADAPTER,
     OpenAIChatCompletionRequest,
     SessionCreateRequest,
+    ZAI_TARGET_ADAPTER,
     _chat_request_from_anthropic,
     _chat_request_from_openai,
     _extract_text_from_message_content,
@@ -152,6 +153,11 @@ def test_resolve_target_adapter_falls_back_to_generic():
 def test_resolve_target_adapter_for_consensus_url():
     adapter = resolve_target_adapter("https://consensus.app/search/")
     assert adapter is CONSENSUS_TARGET_ADAPTER
+
+
+def test_resolve_target_adapter_for_zai_url():
+    adapter = resolve_target_adapter("https://chat.z.ai/")
+    assert adapter is ZAI_TARGET_ADAPTER
 
 
 # ==================== BrowserTab Tests ====================
@@ -398,6 +404,12 @@ def test_skip_placeholder_response_text():
         "Real answer text with actual alphabetic content and citations 1 2 3.",
         CONSENSUS_TARGET_ADAPTER,
     ) is False
+    assert scraper._should_skip_response_text("Thought Process", ZAI_TARGET_ADAPTER) is True
+    assert scraper._should_skip_response_text(
+        "Quality sleep is essential for cognitive function and emotional well-being.",
+        ZAI_TARGET_ADAPTER,
+    ) is False
+    assert scraper._should_skip_response_text("RED", ZAI_TARGET_ADAPTER) is False
 
 
 def test_same_turn_detection():
@@ -409,6 +421,60 @@ def test_same_turn_detection():
     assert CONSENSUS_TARGET_ADAPTER.looks_like_same_turn(
         previous, "Adolescent caffeine use is associated with shorter sleep."
     ) is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_existing_response_waits_for_stable_latest():
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x", session_link="https://chat.z.ai/c/example"))
+    page = AsyncMock()
+    values = iter(["older", "latest", "latest", "latest"])
+
+    async def fake_extract(_page, _profile):
+        return next(values)
+
+    scraper._extract_playwright_response = fake_extract
+    stable = await scraper._snapshot_existing_response(page, "playwright", profile)
+    assert stable == "latest"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_existing_response_can_require_nonempty():
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x", session_link="https://chat.z.ai/c/example"))
+    page = AsyncMock()
+    values = iter(["", "", "older", "latest", "latest", "latest"])
+
+    async def fake_extract(_page, _profile):
+        return next(values)
+
+    scraper._extract_playwright_response = fake_extract
+    stable = await scraper._snapshot_existing_response(page, "playwright", profile, require_nonempty=True)
+    assert stable == "latest"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_resume_ready_waits_past_loading():
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x", session_link="https://chat.z.ai/c/example"))
+    page = AsyncMock()
+    states = iter([
+        ("title", "Loading..."),
+        ("title", "Loading..."),
+        ("title", "Conversation ready"),
+        ("title", "Conversation ready"),
+    ])
+    responses = iter(["", "", "latest", "latest"])
+
+    async def fake_state(_page, _browser_type):
+        return next(states)
+
+    async def fake_extract(_page, _profile):
+        return next(responses)
+
+    scraper._read_page_state = fake_state
+    scraper._extract_playwright_response = fake_extract
+    await scraper._wait_for_resume_ready(page, "playwright", profile)
 
 
 # ==================== API Endpoint Tests ====================

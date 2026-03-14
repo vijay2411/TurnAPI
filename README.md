@@ -19,7 +19,11 @@ The codebase currently works as a browser-backed API bridge with:
 - stored remote conversation links via `session_link`
 - minimal OpenAI-style and Anthropic-style endpoints
 
-The current live-tested target is `consensus.app`, but the runtime is now structured so target-specific logic can be swapped through adapters and selector overrides.
+The current live-tested targets are:
+- `consensus.app`
+- `chat.z.ai`
+
+The runtime is structured so target-specific logic can be swapped through adapters and selector overrides.
 
 ## Recommended runtime model
 
@@ -85,6 +89,17 @@ curl -s -X POST http://127.0.0.1:8002/chat/sync \
   }'
 ```
 
+Example against `chat.z.ai`:
+
+```bash
+curl -s -X POST http://127.0.0.1:8002/chat/sync \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Reply with exactly two words: QUIET HARBOR.",
+    "target_url": "https://chat.z.ai/"
+  }'
+```
+
 Continue the same session:
 
 ```bash
@@ -104,6 +119,17 @@ curl -s -X POST http://127.0.0.1:8002/chat/sync \
   -d '{
     "message": "Continue this conversation",
     "session_link": "https://consensus.app/search/..."
+  }'
+```
+
+Example against a stored `chat.z.ai` conversation:
+
+```bash
+curl -s -X POST http://127.0.0.1:8002/chat/sync \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Now answer with exactly one word: FOAM.",
+    "session_link": "https://chat.z.ai/c/..."
   }'
 ```
 
@@ -263,6 +289,17 @@ The project purpose is Linux Chromium automation. The core runtime is already Ch
 - Session state is in memory; restarting the API drops `session_id` mappings, though `session_link` can be reused later.
 - Source extraction is generic and may need target-specific improvement.
 - Anti-bot protections can still block or degrade automation depending on the site.
+
+## Target notes
+
+### `chat.z.ai`
+
+- Real app URL: `https://chat.z.ai/`
+- Input: `textarea`
+- Send button: `#send-message-button`
+- Conversation URLs: `https://chat.z.ai/c/<uuid>`
+- The `thinking-chain-container` contains intermediate reasoning/loading content and must be excluded from final answer extraction.
+- Attach mode works best when reusing an already-open matching conversation tab for `session_link` resume.
 
 ## Code map
 

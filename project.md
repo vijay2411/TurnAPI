@@ -50,6 +50,7 @@ The codebase now separates site-specific logic from the generic runtime.
 
 Current adapters:
 - `ConsensusTargetAdapter`
+- `ZAITargetAdapter`
 - `GenericTargetAdapter`
 
 This is the key abstraction for taking the same process to other websites.
@@ -116,7 +117,9 @@ The provider-style endpoints are intentionally minimal and modeled after OpenAI/
 
 The root page `/` is a local browser chat client backed by the same API. It is useful for manual testing and debugging, but it is not the core purpose of the project.
 
-## What is specific to Consensus today
+## What is specific to the current integrated targets
+
+### Consensus
 
 Consensus-specific behavior currently includes:
 - URL matching
@@ -126,6 +129,18 @@ Consensus-specific behavior currently includes:
 - selector priorities tuned to Consensus result containers
 
 These belong in the adapter layer and should not leak back into the generic runtime.
+
+### Z.ai
+
+Z.ai-specific behavior currently includes:
+- URL matching for `chat.z.ai` / `z.ai`
+- `textarea` input discovery on the real app page
+- `#send-message-button` submission
+- exclusion of `thinking-chain-container` from final answer extraction
+- support for short final answers like `RED`, `CYAN`, or `FOAM`
+- preference for reusing an already-open matching conversation tab in attach mode when resuming by `session_link`
+
+These also belong in the adapter/session boundary and should not leak into the generic runtime.
 
 ## Current limitations
 

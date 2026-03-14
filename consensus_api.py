@@ -130,6 +130,12 @@ class ConsensusTargetAdapter(BrowserTargetAdapter):
         return hostname.endswith("consensus.app")
 
 
+class ZAITargetAdapter(BrowserTargetAdapter):
+    def matches(self, target_url: str) -> bool:
+        hostname = urlparse(target_url).netloc.lower()
+        return hostname in {"chat.z.ai", "z.ai"}
+
+
 CONSENSUS_TARGET_ADAPTER = ConsensusTargetAdapter(
     name="consensus",
     default_target_url="https://consensus.app/search/",
@@ -191,6 +197,45 @@ CONSENSUS_TARGET_ADAPTER = ConsensusTargetAdapter(
     ),
 )
 
+ZAI_TARGET_ADAPTER = ZAITargetAdapter(
+    name="zai",
+    default_target_url="https://chat.z.ai/",
+    default_input_selectors=(
+        'textarea[placeholder*="How can I help"]',
+        "textarea",
+    ),
+    default_response_selectors=(
+        '#response-content-container > .markdown-prose > :not(.thinking-chain-container):not(.overflow-hidden)',
+        '.chat-assistant #response-content-container > .markdown-prose > :not(.thinking-chain-container):not(.overflow-hidden)',
+        '.chat-assistant .markdown-prose > ul',
+        '.chat-assistant .markdown-prose > ol',
+        '.chat-assistant .markdown-prose > p',
+        '.chat-assistant .markdown-prose',
+    ),
+    default_source_selectors=(
+        '#response-content-container a[href^="http"]',
+        '.chat-assistant a[href^="http"]',
+    ),
+    default_submit_selectors=(
+        "#send-message-button",
+        'button.sendMessageButton',
+        'button[type="submit"]',
+    ),
+    auth_markers=(
+        "/auth",
+        "/login",
+        "continue with google",
+        "continue with github",
+        "create account",
+    ),
+    skip_response_markers=(
+        "thinking...",
+        "thought process",
+        "\nskip\n",
+    ),
+    minimum_response_alpha_chars=1,
+)
+
 GENERIC_TARGET_ADAPTER = GenericTargetAdapter(
     name="generic",
     default_target_url="about:blank",
@@ -223,6 +268,7 @@ GENERIC_TARGET_ADAPTER = GenericTargetAdapter(
 
 TARGET_ADAPTERS: tuple[BrowserTargetAdapter, ...] = (
     CONSENSUS_TARGET_ADAPTER,
+    ZAI_TARGET_ADAPTER,
     GENERIC_TARGET_ADAPTER,
 )
 
@@ -519,8 +565,13 @@ class SessionManager:
 
         if DEFAULT_BROWSER_MODE == "attach":
             context = await self._get_or_attach_playwright_context()
-            page = await context.new_page()
-            await page.goto(target_url, wait_until="domcontentloaded")
+            existing_page = self._find_existing_attached_page(context, target_url)
+            if existing_page:
+                page = existing_page
+                await page.bring_to_front()
+            else:
+                page = await context.new_page()
+                await page.goto(target_url, wait_until="domcontentloaded")
             return BrowserTab(
                 session_id=sid,
                 page=page,
@@ -530,7 +581,7 @@ class SessionManager:
                 target_url=target_url,
                 current_url=target_url,
                 in_use=True,
-                owns_page=True,
+                owns_page=existing_page is None,
                 owns_context=False,
                 owns_browser=False,
             )
@@ -599,6 +650,16 @@ class SessionManager:
                 "Attached browser has no available context. Open Chrome with remote debugging and a normal profile first.",
             )
         return self._playwright_browser.contexts[0]
+
+    def _find_existing_attached_page(self, context: Any, target_url: str) -> Any | None:
+        normalized_target = target_url.rstrip("/")
+        for page in reversed(context.pages):
+            page_url = str(getattr(page, "url", "") or "").rstrip("/")
+            if not page_url:
+                continue
+            if page_url == normalized_target:
+                return page
+        return None
 
     def _playwright_launch_args(self) -> list[str]:
         args = [
@@ -799,7 +860,14 @@ class BrowserChatScraper:
         page = tab.page
         await page.sleep(1)
         await self._assert_not_blocked(page, tab.browser_type, profile)
-        previous_response = await self._extract_nodriver_response(page, profile)
+        if request.session_link and not request.session_id:
+            await self._wait_for_resume_ready(page, tab.browser_type, profile)
+        previous_response = await self._snapshot_existing_response(
+            page,
+            tab.browser_type,
+            profile,
+            require_nonempty=bool(request.session_link and not request.session_id),
+        )
         input_box = await self._find_nodriver_input(page, profile.input_selectors, profile.timeout_seconds)
         if not input_box:
             yield json.dumps({"error": "Chat input not found", "session_id": tab.session_id})
@@ -861,7 +929,14 @@ class BrowserChatScraper:
     async def _playwright_chat(self, tab: BrowserTab, request: ChatRequest, profile: BrowserChatProfile):
         page = tab.page
         await self._assert_not_blocked(page, tab.browser_type, profile)
-        previous_response = await self._extract_playwright_response(page, profile)
+        if request.session_link and not request.session_id:
+            await self._wait_for_resume_ready(page, tab.browser_type, profile)
+        previous_response = await self._snapshot_existing_response(
+            page,
+            tab.browser_type,
+            profile,
+            require_nonempty=bool(request.session_link and not request.session_id),
+        )
         input_selector = await self._find_playwright_selector(page, profile.input_selectors, profile.timeout_seconds)
         if not input_selector:
             yield json.dumps({"error": "Chat input not found", "session_id": tab.session_id})
@@ -975,6 +1050,66 @@ class BrowserChatScraper:
                     continue
                 return text
         return ""
+
+    async def _snapshot_existing_response(
+        self,
+        page: Any,
+        browser_type: str,
+        profile: BrowserChatProfile,
+        require_nonempty: bool = False,
+    ) -> str:
+        last_text = ""
+        stable_polls = 0
+        max_polls = 16 if require_nonempty else 6
+        saw_nonempty = False
+
+        for _ in range(max_polls):
+            if browser_type == "playwright":
+                current_text = await self._extract_playwright_response(page, profile)
+                await asyncio.sleep(0.35)
+            else:
+                current_text = await self._extract_nodriver_response(page, profile)
+                await page.sleep(0.35)
+
+            if current_text.strip():
+                saw_nonempty = True
+
+            if current_text == last_text:
+                stable_polls += 1
+                if stable_polls >= 2 and (saw_nonempty or not require_nonempty):
+                    return current_text
+                continue
+
+            last_text = current_text
+            stable_polls = 0
+
+        return last_text
+
+    async def _wait_for_resume_ready(self, page: Any, browser_type: str, profile: BrowserChatProfile) -> None:
+        stable_polls = 0
+        max_polls = 20
+
+        for _ in range(max_polls):
+            title, body_text = await self._read_page_state(page, browser_type)
+            lowered = f"{title}\n{body_text}".lower()
+            current_text = ""
+            if browser_type == "playwright":
+                current_text = await self._extract_playwright_response(page, profile)
+                await asyncio.sleep(0.4)
+            else:
+                current_text = await self._extract_nodriver_response(page, profile)
+                await page.sleep(0.4)
+
+            if "loading..." not in lowered and current_text.strip():
+                stable_polls += 1
+                if stable_polls >= 2:
+                    if browser_type == "playwright":
+                        await asyncio.sleep(1.5)
+                    else:
+                        await page.sleep(1.5)
+                    return
+            else:
+                stable_polls = 0
 
     async def _extract_playwright_sources(self, page: Any, selectors: list[str]) -> list[dict[str, str]]:
         seen: set[str] = set()
