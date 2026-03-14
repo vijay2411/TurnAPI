@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -39,54 +40,216 @@ def _csv_env(name: str, default: list[str]) -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
-DEFAULT_TARGET_URL = os.getenv("BROWSER_CHAT_URL", "https://consensus.app/search/")
-DEFAULT_INPUT_SELECTORS = _csv_env(
-    "BROWSER_CHAT_INPUT_SELECTORS",
-    [
+@dataclass(frozen=True)
+class BrowserTargetAdapter:
+    name: str
+    default_target_url: str
+    default_input_selectors: tuple[str, ...]
+    default_response_selectors: tuple[str, ...]
+    default_source_selectors: tuple[str, ...]
+    default_submit_selectors: tuple[str, ...]
+    blocked_markers: tuple[str, ...] = ()
+    auth_markers: tuple[str, ...] = ()
+    skip_response_markers: tuple[str, ...] = ()
+    minimum_response_alpha_chars: int = 24
+    latest_response_window: int = 8
+
+    def matches(self, target_url: str) -> bool:
+        return False
+
+    def build_profile(self, request: "ChatRequest", target_url: str) -> "BrowserChatProfile":
+        return BrowserChatProfile(
+            target_url=target_url,
+            adapter=self,
+            input_selectors=request.input_selectors or _csv_env(
+                "BROWSER_CHAT_INPUT_SELECTORS",
+                list(self.default_input_selectors),
+            ),
+            response_selectors=request.response_selectors or _csv_env(
+                "BROWSER_CHAT_RESPONSE_SELECTORS",
+                list(self.default_response_selectors),
+            ),
+            source_selectors=request.source_selectors or _csv_env(
+                "BROWSER_CHAT_SOURCE_SELECTORS",
+                list(self.default_source_selectors),
+            ),
+            submit_selectors=request.submit_selectors or _csv_env(
+                "BROWSER_CHAT_SUBMIT_SELECTORS",
+                list(self.default_submit_selectors),
+            ),
+        )
+
+    def should_skip_response_text(self, text: str) -> bool:
+        lowered = text.lower()
+        if not lowered.strip():
+            return True
+        if any(marker in lowered for marker in self.skip_response_markers):
+            return True
+        alphabetic_count = sum(char.isalpha() for char in text)
+        if alphabetic_count < self.minimum_response_alpha_chars:
+            return True
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        nonword_lines = sum(1 for line in lines if not any(char.isalpha() for char in line))
+        if lines and nonword_lines / max(len(lines), 1) > 0.5:
+            return True
+        return False
+
+    def looks_like_same_turn(self, previous: str, current: str) -> bool:
+        previous_clean = previous.strip()
+        current_clean = current.strip()
+        if not current_clean:
+            return True
+        if not previous_clean:
+            return False
+        if current_clean == previous_clean:
+            return True
+        if current_clean in previous_clean:
+            return True
+        overlap = min(len(previous_clean), len(current_clean), 400)
+        if overlap and previous_clean[:overlap] == current_clean[:overlap]:
+            return True
+        return False
+
+    def is_blocked(self, current_url: str, title: str, body_text: str) -> bool:
+        lowered = f"{current_url}\n{title}\n{body_text}".lower()
+        return any(marker in lowered for marker in self.blocked_markers)
+
+    def is_auth_wall(self, current_url: str, title: str, body_text: str) -> bool:
+        lowered = f"{current_url}\n{title}\n{body_text}".lower()
+        return any(marker in lowered for marker in self.auth_markers)
+
+
+class GenericTargetAdapter(BrowserTargetAdapter):
+    def matches(self, target_url: str) -> bool:
+        return True
+
+
+class ConsensusTargetAdapter(BrowserTargetAdapter):
+    def matches(self, target_url: str) -> bool:
+        hostname = urlparse(target_url).netloc.lower()
+        return hostname.endswith("consensus.app")
+
+
+CONSENSUS_TARGET_ADAPTER = ConsensusTargetAdapter(
+    name="consensus",
+    default_target_url="https://consensus.app/search/",
+    default_input_selectors=(
         'textarea[placeholder*="Ask"]',
         'textarea[placeholder*="Message"]',
-        'textarea',
+        "textarea",
         'input[placeholder*="Ask"]',
         'input[placeholder*="Message"]',
         'div[contenteditable="true"]',
-    ],
-)
-DEFAULT_RESPONSE_SELECTORS = _csv_env(
-    "BROWSER_CHAT_RESPONSE_SELECTORS",
-    [
-        'main .prose',
-        '.prose',
+    ),
+    default_response_selectors=(
+        "main .prose",
+        ".prose",
         '[data-testid="search-results-list"]',
         '[data-testid="search-result"]',
         '[data-testid="drawer-content"]',
         '[data-message-author-role="assistant"]',
         '[data-testid*="assistant"]',
-        'main article',
+        "main article",
         '[class*="response"]',
         '[class*="answer"]',
-        'article',
-    ],
-)
-DEFAULT_SOURCE_SELECTORS = _csv_env(
-    "BROWSER_CHAT_SOURCE_SELECTORS",
-    [
+        "article",
+    ),
+    default_source_selectors=(
         '[data-testid="search-result"] a[href^="http"]',
         '[data-testid="drawer-content"] a[href^="http"]',
         'a[href*="doi.org"]',
         'a[href*="pubmed"]',
         'a[href*="ncbi.nlm.nih.gov"]',
         'a[href^="http"]',
-    ],
-)
-DEFAULT_SUBMIT_SELECTORS = _csv_env(
-    "BROWSER_CHAT_SUBMIT_SELECTORS",
-    [
+    ),
+    default_submit_selectors=(
         "#search-button",
         '[data-testid="search-button"]',
         'button[type="submit"]',
         'button[aria-label*="Submit"]',
         'button[aria-label*="Search"]',
-    ],
+    ),
+    blocked_markers=(
+        "just a moment",
+        "performing security verification",
+        "verify you are not a bot",
+        "checking your browser",
+        "cloudflare",
+        "security service to protect against malicious bots",
+    ),
+    auth_markers=(
+        "/sign-up",
+        "/sign-in",
+        "create a free account to continue",
+        "continue with google",
+        "sign up - consensus",
+        "sign in - consensus",
+    ),
+    skip_response_markers=(
+        "something went wrong",
+        "a quick page refresh usually fixes this",
+    ),
+)
+
+GENERIC_TARGET_ADAPTER = GenericTargetAdapter(
+    name="generic",
+    default_target_url="about:blank",
+    default_input_selectors=(
+        'textarea[placeholder*="Ask"]',
+        'textarea[placeholder*="Message"]',
+        "textarea",
+        'input[placeholder*="Ask"]',
+        'input[placeholder*="Message"]',
+        'div[contenteditable="true"]',
+    ),
+    default_response_selectors=(
+        '[data-message-author-role="assistant"]',
+        '[data-testid*="assistant"]',
+        "main .prose",
+        ".prose",
+        "main article",
+        '[class*="response"]',
+        '[class*="answer"]',
+        "article",
+    ),
+    default_source_selectors=('a[href^="http"]',),
+    default_submit_selectors=(
+        'button[type="submit"]',
+        'button[aria-label*="Submit"]',
+        'button[aria-label*="Send"]',
+        'button[aria-label*="Search"]',
+    ),
+)
+
+TARGET_ADAPTERS: tuple[BrowserTargetAdapter, ...] = (
+    CONSENSUS_TARGET_ADAPTER,
+    GENERIC_TARGET_ADAPTER,
+)
+
+
+def resolve_target_adapter(target_url: str) -> BrowserTargetAdapter:
+    for adapter in TARGET_ADAPTERS:
+        if adapter.matches(target_url):
+            return adapter
+    return GENERIC_TARGET_ADAPTER
+
+
+DEFAULT_TARGET_URL = os.getenv("BROWSER_CHAT_URL", CONSENSUS_TARGET_ADAPTER.default_target_url)
+DEFAULT_INPUT_SELECTORS = _csv_env(
+    "BROWSER_CHAT_INPUT_SELECTORS",
+    list(CONSENSUS_TARGET_ADAPTER.default_input_selectors),
+)
+DEFAULT_RESPONSE_SELECTORS = _csv_env(
+    "BROWSER_CHAT_RESPONSE_SELECTORS",
+    list(CONSENSUS_TARGET_ADAPTER.default_response_selectors),
+)
+DEFAULT_SOURCE_SELECTORS = _csv_env(
+    "BROWSER_CHAT_SOURCE_SELECTORS",
+    list(CONSENSUS_TARGET_ADAPTER.default_source_selectors),
+)
+DEFAULT_SUBMIT_SELECTORS = _csv_env(
+    "BROWSER_CHAT_SUBMIT_SELECTORS",
+    list(CONSENSUS_TARGET_ADAPTER.default_submit_selectors),
 )
 
 DEFAULT_WAIT_TIMEOUT_SECONDS = int(os.getenv("BROWSER_CHAT_WAIT_TIMEOUT_SECONDS", "90"))
@@ -124,6 +287,10 @@ except ImportError:
 class ChatRequest(BaseModel):
     message: str = Field(..., description="Message to send to the remote browser chat")
     session_id: str | None = None
+    session_link: str | None = Field(
+        default=None,
+        description="Direct URL for an existing remote chat that should be reopened or continued",
+    )
     stream: bool = True
     headless: bool = Field(default=False, description="Run the browser invisibly")
     solve_captcha: bool = True
@@ -156,9 +323,65 @@ class ChatResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SessionCreateRequest(BaseModel):
+    session_id: str | None = None
+    session_link: str | None = None
+    target_url: str | None = None
+    headless: bool = False
+    input_selectors: list[str] | None = None
+    response_selectors: list[str] | None = None
+    source_selectors: list[str] | None = None
+    submit_selectors: list[str] | None = None
+
+    def to_chat_request(self, message: str = "") -> ChatRequest:
+        return ChatRequest(
+            message=message or " ",
+            session_id=self.session_id,
+            session_link=self.session_link,
+            stream=False,
+            headless=self.headless,
+            solve_captcha=True,
+            target_url=self.target_url,
+            input_selectors=self.input_selectors,
+            response_selectors=self.response_selectors,
+            source_selectors=self.source_selectors,
+            submit_selectors=self.submit_selectors,
+        )
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    model: str = "browser-chat"
+    messages: list[dict[str, Any]]
+    stream: bool = False
+    session_id: str | None = None
+    session_link: str | None = None
+    target_url: str | None = None
+    headless: bool = False
+    input_selectors: list[str] | None = None
+    response_selectors: list[str] | None = None
+    source_selectors: list[str] | None = None
+    submit_selectors: list[str] | None = None
+
+
+class AnthropicMessagesRequest(BaseModel):
+    model: str = "browser-chat"
+    messages: list[dict[str, Any]]
+    stream: bool = False
+    max_tokens: int | None = None
+    session_id: str | None = None
+    session_link: str | None = None
+    target_url: str | None = None
+    headless: bool = False
+    input_selectors: list[str] | None = None
+    response_selectors: list[str] | None = None
+    source_selectors: list[str] | None = None
+    submit_selectors: list[str] | None = None
+
+
 @dataclass
 class BrowserChatProfile:
     target_url: str
+    adapter: BrowserTargetAdapter = field(repr=False)
     input_selectors: list[str]
     response_selectors: list[str]
     source_selectors: list[str]
@@ -169,13 +392,9 @@ class BrowserChatProfile:
 
     @classmethod
     def from_request(cls, request: ChatRequest) -> "BrowserChatProfile":
-        return cls(
-            target_url=request.target_url or DEFAULT_TARGET_URL,
-            input_selectors=request.input_selectors or DEFAULT_INPUT_SELECTORS,
-            response_selectors=request.response_selectors or DEFAULT_RESPONSE_SELECTORS,
-            source_selectors=request.source_selectors or DEFAULT_SOURCE_SELECTORS,
-            submit_selectors=request.submit_selectors or DEFAULT_SUBMIT_SELECTORS,
-        )
+        target_url = request.session_link or request.target_url or DEFAULT_TARGET_URL
+        adapter = resolve_target_adapter(target_url)
+        return adapter.build_profile(request, target_url)
 
 
 @dataclass
@@ -186,6 +405,7 @@ class BrowserTab:
     browser: Any = None
     browser_context: Any = None
     target_url: str | None = None
+    current_url: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     last_used: datetime = field(default_factory=datetime.now)
     message_count: int = 0
@@ -217,6 +437,7 @@ class SessionManager:
     ) -> BrowserTab:
         profile = profile or BrowserChatProfile(
             target_url=DEFAULT_TARGET_URL,
+            adapter=resolve_target_adapter(DEFAULT_TARGET_URL),
             input_selectors=DEFAULT_INPUT_SELECTORS,
             response_selectors=DEFAULT_RESPONSE_SELECTORS,
             source_selectors=DEFAULT_SOURCE_SELECTORS,
@@ -281,6 +502,7 @@ class SessionManager:
                 browser=browser,
                 browser_type="nodriver",
                 target_url=profile.target_url,
+                current_url=profile.target_url,
                 in_use=True,
             )
         else:
@@ -306,6 +528,7 @@ class SessionManager:
                 browser_context=context,
                 browser_type="playwright",
                 target_url=target_url,
+                current_url=target_url,
                 in_use=True,
                 owns_page=True,
                 owns_context=False,
@@ -328,6 +551,7 @@ class SessionManager:
                 browser_context=context,
                 browser_type="playwright",
                 target_url=target_url,
+                current_url=target_url,
                 in_use=True,
                 owns_page=True,
                 owns_context=True,
@@ -345,6 +569,7 @@ class SessionManager:
             browser_context=context,
             browser_type="playwright",
             target_url=target_url,
+            current_url=target_url,
             in_use=True,
             owns_page=True,
             owns_context=False,
@@ -425,6 +650,7 @@ class SessionManager:
             tab.page = await tab.browser.get(target_url)
             await asyncio.sleep(2)
         tab.target_url = target_url
+        tab.current_url = target_url
 
     async def _is_session_alive(self, tab: BrowserTab) -> bool:
         try:
@@ -534,7 +760,7 @@ class AuthenticationRequiredError(RuntimeError):
     """Raised when the target site redirects the browser to an auth wall."""
 
 
-class ConsensusScraper:
+class BrowserChatScraper:
     def __init__(self, sessions: SessionManager):
         self.sessions = sessions
         self.captcha = CaptchaHandler()
@@ -572,8 +798,8 @@ class ConsensusScraper:
     async def _nodriver_chat(self, tab: BrowserTab, request: ChatRequest, profile: BrowserChatProfile):
         page = tab.page
         await page.sleep(1)
-        await self._assert_not_blocked(page, tab.browser_type)
-        previous_response = await self._extract_nodriver_response(page, profile.response_selectors)
+        await self._assert_not_blocked(page, tab.browser_type, profile)
+        previous_response = await self._extract_nodriver_response(page, profile)
         input_box = await self._find_nodriver_input(page, profile.input_selectors, profile.timeout_seconds)
         if not input_box:
             yield json.dumps({"error": "Chat input not found", "session_id": tab.session_id})
@@ -592,11 +818,11 @@ class ConsensusScraper:
 
         for _ in range(max_polls):
             await page.sleep(profile.poll_interval_seconds)
-            current_text = await self._extract_nodriver_response(page, profile.response_selectors)
+            current_text = await self._extract_nodriver_response(page, profile)
             if not current_text:
                 continue
             if not seen_new_response:
-                if self._looks_like_same_turn(previous_response, current_text):
+                if profile.adapter.looks_like_same_turn(previous_response, current_text):
                     continue
                 seen_new_response = True
             if current_text != last_text:
@@ -617,8 +843,10 @@ class ConsensusScraper:
                     break
 
         sources = await self._extract_nodriver_sources(page, profile.source_selectors)
-        await self._assert_valid_completion(last_text, sources, page, tab.browser_type)
+        await self._assert_valid_completion(last_text, sources, page, tab.browser_type, profile)
+        current_url = await self._read_page_url(page, tab.browser_type)
         tab.last_response_text = last_text
+        tab.current_url = current_url
         yield json.dumps(
             {
                 "type": "complete",
@@ -626,13 +854,14 @@ class ConsensusScraper:
                 "sources": sources,
                 "session_id": tab.session_id,
                 "target_url": profile.target_url,
+                "session_link": current_url,
             }
         )
 
     async def _playwright_chat(self, tab: BrowserTab, request: ChatRequest, profile: BrowserChatProfile):
         page = tab.page
-        await self._assert_not_blocked(page, tab.browser_type)
-        previous_response = await self._extract_playwright_response(page, profile.response_selectors)
+        await self._assert_not_blocked(page, tab.browser_type, profile)
+        previous_response = await self._extract_playwright_response(page, profile)
         input_selector = await self._find_playwright_selector(page, profile.input_selectors, profile.timeout_seconds)
         if not input_selector:
             yield json.dumps({"error": "Chat input not found", "session_id": tab.session_id})
@@ -658,11 +887,11 @@ class ConsensusScraper:
 
         for _ in range(max_polls):
             await asyncio.sleep(profile.poll_interval_seconds)
-            current_text = await self._extract_playwright_response(page, profile.response_selectors)
+            current_text = await self._extract_playwright_response(page, profile)
             if not current_text:
                 continue
             if not seen_new_response:
-                if self._looks_like_same_turn(previous_response, current_text):
+                if profile.adapter.looks_like_same_turn(previous_response, current_text):
                     continue
                 seen_new_response = True
             if current_text != last_text:
@@ -683,8 +912,10 @@ class ConsensusScraper:
                     break
 
         sources = await self._extract_playwright_sources(page, profile.source_selectors)
-        await self._assert_valid_completion(last_text, sources, page, tab.browser_type)
+        await self._assert_valid_completion(last_text, sources, page, tab.browser_type, profile)
+        current_url = await self._read_page_url(page, tab.browser_type)
         tab.last_response_text = last_text
+        tab.current_url = current_url
         yield json.dumps(
             {
                 "type": "complete",
@@ -692,6 +923,7 @@ class ConsensusScraper:
                 "sources": sources,
                 "session_id": tab.session_id,
                 "target_url": profile.target_url,
+                "session_link": current_url,
             }
         )
 
@@ -718,28 +950,28 @@ class ConsensusScraper:
             await page.sleep(0.25)
         return None
 
-    async def _extract_playwright_response(self, page: Any, selectors: list[str]) -> str:
-        for selector in selectors:
+    async def _extract_playwright_response(self, page: Any, profile: BrowserChatProfile) -> str:
+        for selector in profile.response_selectors:
             try:
                 elements = await page.query_selector_all(selector)
             except PlaywrightError:
                 continue
-            for element in reversed(elements[-8:]):
+            for element in reversed(elements[-profile.adapter.latest_response_window :]):
                 try:
                     text = (await element.inner_text()).strip()
                 except PlaywrightError:
                     continue
-                if self._should_skip_response_text(text):
+                if self._should_skip_response_text(text, profile.adapter):
                     continue
                 return text
         return ""
 
-    async def _extract_nodriver_response(self, page: Any, selectors: list[str]) -> str:
-        for selector in selectors:
+    async def _extract_nodriver_response(self, page: Any, profile: BrowserChatProfile) -> str:
+        for selector in profile.response_selectors:
             elements = await page.select_all(selector)
-            for element in reversed(elements[-8:]):
+            for element in reversed(elements[-profile.adapter.latest_response_window :]):
                 text = (await element.get_text()).strip()
-                if self._should_skip_response_text(text):
+                if self._should_skip_response_text(text, profile.adapter):
                     continue
                 return text
         return ""
@@ -812,50 +1044,18 @@ class ConsensusScraper:
             return current.split(previous, 1)[1]
         return current
 
-    def _should_skip_response_text(self, text: str) -> bool:
-        lowered = text.lower()
-        if not lowered.strip():
-            return True
-        skip_markers = [
-            "something went wrong",
-            "a quick page refresh usually fixes this",
-        ]
-        if any(marker in lowered for marker in skip_markers):
-            return True
-        alphabetic_count = sum(char.isalpha() for char in text)
-        if alphabetic_count < 24:
-            return True
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        nonword_lines = sum(1 for line in lines if not any(char.isalpha() for char in line))
-        if lines and nonword_lines / max(len(lines), 1) > 0.5:
-            return True
-        return False
+    def _should_skip_response_text(self, text: str, adapter: BrowserTargetAdapter) -> bool:
+        return adapter.should_skip_response_text(text)
 
-    def _looks_like_same_turn(self, previous: str, current: str) -> bool:
-        previous_clean = previous.strip()
-        current_clean = current.strip()
-        if not current_clean:
-            return True
-        if not previous_clean:
-            return False
-        if current_clean == previous_clean:
-            return True
-        if current_clean in previous_clean:
-            return True
-        overlap = min(len(previous_clean), len(current_clean), 400)
-        if overlap and previous_clean[:overlap] == current_clean[:overlap]:
-            return True
-        return False
-
-    async def _assert_not_blocked(self, page: Any, browser_type: str) -> None:
+    async def _assert_not_blocked(self, page: Any, browser_type: str, profile: BrowserChatProfile) -> None:
         title, body_text = await self._read_page_state(page, browser_type)
         current_url = await self._read_page_url(page, browser_type)
-        if self._is_auth_wall(current_url, title, body_text):
+        if profile.adapter.is_auth_wall(current_url, title, body_text):
             raise AuthenticationRequiredError(
                 "Target page redirected to a sign-in/sign-up wall. "
                 "Authenticate in the attached browser profile before using the API."
             )
-        if self._is_blocked_text(title, body_text):
+        if profile.adapter.is_blocked(current_url, title, body_text):
             raise BlockingPageError(
                 "Target page is blocked by a security verification screen; "
                 "the chat UI is not reachable in the current browser session."
@@ -882,6 +1082,7 @@ class ConsensusScraper:
         sources: list[dict[str, str]],
         page: Any,
         browser_type: str,
+        profile: BrowserChatProfile,
     ) -> None:
         if content.strip():
             return
@@ -892,12 +1093,12 @@ class ConsensusScraper:
             )
         title, body_text = await self._read_page_state(page, browser_type)
         current_url = await self._read_page_url(page, browser_type)
-        if self._is_auth_wall(current_url, title, body_text):
+        if profile.adapter.is_auth_wall(current_url, title, body_text):
             raise AuthenticationRequiredError(
                 "Target page redirected to a sign-in/sign-up wall. "
                 "Authenticate in the attached browser profile before using the API."
             )
-        if self._is_blocked_text(title, body_text):
+        if profile.adapter.is_blocked(current_url, title, body_text):
             raise BlockingPageError(
                 "Target page is blocked by a security verification screen; "
                 "the chat UI is not reachable in the current browser session."
@@ -907,39 +1108,311 @@ class ConsensusScraper:
             "The browser likely reached a landing page or the selectors do not match the live chat UI."
         )
 
-    def _is_blocked_text(self, title: str, body_text: str) -> bool:
-        lowered = f"{title}\n{body_text}".lower()
-        block_markers = [
-            "just a moment",
-            "performing security verification",
-            "verify you are not a bot",
-            "checking your browser",
-            "cloudflare",
-            "security service to protect against malicious bots",
-        ]
-        return any(marker in lowered for marker in block_markers)
-
-    def _is_auth_wall(self, current_url: str, title: str, body_text: str) -> bool:
-        lowered = f"{current_url}\n{title}\n{body_text}".lower()
-        auth_markers = [
-            "/sign-up",
-            "/sign-in",
-            "create a free account to continue",
-            "continue with google",
-            "sign up - consensus",
-            "sign in - consensus",
-        ]
-        return any(marker in lowered for marker in auth_markers)
-
 
 sessions = SessionManager()
 scraper = None
+ConsensusScraper = BrowserChatScraper
+
+
+def _extract_text_from_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and item.get("text"):
+                parts.append(str(item["text"]))
+        return "\n".join(part for part in parts if part)
+    if isinstance(content, dict) and content.get("text"):
+        return str(content["text"])
+    return ""
+
+
+def _last_user_message(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        text = _extract_text_from_message_content(message.get("content"))
+        if text.strip():
+            return text.strip()
+    raise HTTPException(400, "At least one user message is required")
+
+
+def _chat_request_from_openai(request: OpenAIChatCompletionRequest) -> ChatRequest:
+    return ChatRequest(
+        message=_last_user_message(request.messages),
+        session_id=request.session_id,
+        session_link=request.session_link,
+        stream=request.stream,
+        headless=request.headless,
+        target_url=request.target_url,
+        input_selectors=request.input_selectors,
+        response_selectors=request.response_selectors,
+        source_selectors=request.source_selectors,
+        submit_selectors=request.submit_selectors,
+    )
+
+
+def _chat_request_from_anthropic(request: AnthropicMessagesRequest) -> ChatRequest:
+    return ChatRequest(
+        message=_last_user_message(request.messages),
+        session_id=request.session_id,
+        session_link=request.session_link,
+        stream=request.stream,
+        headless=request.headless,
+        target_url=request.target_url,
+        input_selectors=request.input_selectors,
+        response_selectors=request.response_selectors,
+        source_selectors=request.source_selectors,
+        submit_selectors=request.submit_selectors,
+    )
+
+
+async def _collect_chat_result(request: ChatRequest) -> dict[str, Any]:
+    request.stream = False
+    fallback_chunks: list[str] = []
+    last_payload: dict[str, Any] | None = None
+
+    async for chunk in scraper.chat(request):
+        payload = json.loads(chunk)
+        last_payload = payload
+        if payload.get("error"):
+            raise HTTPException(502, payload["error"])
+        if payload.get("type") == "complete":
+            payload.setdefault("session_id", request.session_id)
+            payload.setdefault("sources", [])
+            payload.setdefault("target_url", request.session_link or request.target_url or DEFAULT_TARGET_URL)
+            payload.setdefault("session_link", request.session_link or payload.get("target_url"))
+            return payload
+        if payload.get("content"):
+            fallback_chunks.append(payload["content"])
+
+    return {
+        "type": "complete",
+        "content": "".join(fallback_chunks),
+        "sources": [],
+        "session_id": request.session_id or (last_payload or {}).get("session_id"),
+        "target_url": request.session_link or request.target_url or DEFAULT_TARGET_URL,
+        "session_link": request.session_link or (last_payload or {}).get("session_link"),
+    }
+
+
+async def _session_info(tab: BrowserTab) -> dict[str, Any]:
+    current_url = tab.current_url
+    if not current_url:
+        try:
+            current_url = await scraper._read_page_url(tab.page, tab.browser_type)
+        except Exception:
+            current_url = tab.target_url
+    return {
+        "id": tab.session_id,
+        "session_id": tab.session_id,
+        "target_url": tab.target_url,
+        "session_link": current_url,
+        "current_url": current_url,
+        "browser_type": tab.browser_type,
+        "message_count": tab.message_count,
+        "in_use": tab.in_use,
+        "created_at": tab.created_at.isoformat(),
+        "last_used": tab.last_used.isoformat(),
+    }
+
+
+def _openai_completion_payload(result: dict[str, Any], model: str) -> dict[str, Any]:
+    created = int(time.time())
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    content = result.get("content", "")
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content,
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        },
+        "session_id": result.get("session_id"),
+        "session_link": result.get("session_link"),
+        "target_url": result.get("target_url"),
+        "sources": result.get("sources", []),
+    }
+
+
+def _anthropic_message_payload(result: dict[str, Any], model: str) -> dict[str, Any]:
+    created = datetime.utcnow().isoformat() + "Z"
+    return {
+        "id": f"msg_{uuid.uuid4().hex[:24]}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [
+            {
+                "type": "text",
+                "text": result.get("content", ""),
+            }
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+        },
+        "session_id": result.get("session_id"),
+        "session_link": result.get("session_link"),
+        "target_url": result.get("target_url"),
+        "sources": result.get("sources", []),
+        "created_at": created,
+    }
+
+
+async def _stream_openai_response(request: ChatRequest, model: str):
+    created = int(time.time())
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    session_id: str | None = None
+    session_link: str | None = None
+
+    async for chunk in scraper.chat(request):
+        payload = json.loads(chunk)
+        if payload.get("error"):
+            error_chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "error",
+                    }
+                ],
+                "error": payload["error"],
+            }
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        session_id = payload.get("session_id") or session_id
+        session_link = payload.get("session_link") or session_link
+        if payload.get("type") == "delta" and payload.get("content"):
+            data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": payload["content"],
+                        },
+                        "finish_reason": None,
+                    }
+                ],
+                "session_id": session_id,
+                "session_link": session_link,
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+        elif payload.get("type") == "complete":
+            data = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "session_id": session_id,
+                "session_link": payload.get("session_link") or session_link,
+                "sources": payload.get("sources", []),
+            }
+            yield f"data: {json.dumps(data)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _stream_anthropic_response(request: ChatRequest, model: str):
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    session_id: str | None = None
+    session_link: str | None = None
+    started = False
+
+    async for chunk in scraper.chat(request):
+        payload = json.loads(chunk)
+        if payload.get("error"):
+            yield "event: error\n"
+            yield f"data: {json.dumps({'type': 'error', 'error': {'message': payload['error']}})}\n\n"
+            return
+        if not started:
+            message_start = {
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                },
+            }
+            yield "event: message_start\n"
+            yield f"data: {json.dumps(message_start)}\n\n"
+            yield "event: content_block_start\n"
+            yield f"data: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+            started = True
+        session_id = payload.get("session_id") or session_id
+        session_link = payload.get("session_link") or session_link
+        if payload.get("type") == "delta" and payload.get("content"):
+            delta = {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": payload["content"]},
+            }
+            yield "event: content_block_delta\n"
+            yield f"data: {json.dumps(delta)}\n\n"
+        elif payload.get("type") == "complete":
+            yield "event: content_block_stop\n"
+            yield f"data: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+            message_delta = {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": 0},
+                "session_id": session_id,
+                "session_link": payload.get("session_link") or session_link,
+                "sources": payload.get("sources", []),
+            }
+            yield "event: message_delta\n"
+            yield f"data: {json.dumps(message_delta)}\n\n"
+            yield "event: message_stop\n"
+            yield f"data: {json.dumps({'type': 'message_stop'})}\n\n"
+            return
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global scraper
-    scraper = ConsensusScraper(sessions)
+    scraper = BrowserChatScraper(sessions)
     console.print("[bold green]Browser chat API ready[/bold green]")
     yield
     await sessions.cleanup()
@@ -972,30 +1445,59 @@ async def chat_endpoint(request: ChatRequest):
 
 @app.post("/chat/sync")
 async def chat_sync(request: ChatRequest):
-    request.stream = False
-    fallback_chunks: list[str] = []
-    last_payload: dict[str, Any] | None = None
+    return await _collect_chat_result(request)
 
-    async for chunk in scraper.chat(request):
-        payload = json.loads(chunk)
-        last_payload = payload
-        if payload.get("error"):
-            raise HTTPException(502, payload["error"])
-        if payload.get("type") == "complete":
-            payload.setdefault("session_id", request.session_id)
-            payload.setdefault("sources", [])
-            payload.setdefault("target_url", request.target_url or DEFAULT_TARGET_URL)
-            return payload
-        if payload.get("content"):
-            fallback_chunks.append(payload["content"])
 
-    return {
-        "type": "complete",
-        "content": "".join(fallback_chunks),
-        "sources": [],
-        "session_id": request.session_id or (last_payload or {}).get("session_id"),
-        "target_url": request.target_url or DEFAULT_TARGET_URL,
-    }
+@app.post("/v1/sessions")
+async def create_session(request: SessionCreateRequest):
+    profile = BrowserChatProfile.from_request(request.to_chat_request())
+    tab = await sessions.get_session(
+        request_session_id=request.session_id,
+        headless=request.headless,
+        profile=profile,
+    )
+    try:
+        return await _session_info(tab)
+    finally:
+        sessions.release(tab.session_id)
+
+
+@app.get("/v1/sessions")
+async def list_sessions():
+    items = [await _session_info(tab) for tab in sessions.sessions.values()]
+    return {"object": "list", "data": items}
+
+
+@app.get("/v1/sessions/{session_id}")
+async def get_session(session_id: str):
+    tab = sessions.sessions.get(session_id)
+    if not tab:
+        raise HTTPException(404, f"Unknown session_id: {session_id}")
+    return await _session_info(tab)
+
+
+@app.post("/v1/chat/completions")
+async def openai_chat_completions(request: OpenAIChatCompletionRequest):
+    bridge_request = _chat_request_from_openai(request)
+    if request.stream:
+        return StreamingResponse(
+            _stream_openai_response(bridge_request, request.model),
+            media_type="text/event-stream",
+        )
+    result = await _collect_chat_result(bridge_request)
+    return _openai_completion_payload(result, request.model)
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: AnthropicMessagesRequest):
+    bridge_request = _chat_request_from_anthropic(request)
+    if request.stream:
+        return StreamingResponse(
+            _stream_anthropic_response(bridge_request, request.model),
+            media_type="text/event-stream",
+        )
+    result = await _collect_chat_result(bridge_request)
+    return _anthropic_message_payload(result, request.model)
 
 
 @app.get("/health")

@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 
 from consensus_api import (
     AuthenticationRequiredError,
+    AnthropicMessagesRequest,
+    BrowserChatScraper,
+    BrowserTargetAdapter,
     DEFAULT_BROWSER_DRIVER,
     DEFAULT_BROWSER_CDP_URL,
     DEFAULT_BROWSER_MODE,
@@ -20,8 +23,18 @@ from consensus_api import (
     ChatRequest,
     ChatResponse,
     CaptchaHandler,
+    CONSENSUS_TARGET_ADAPTER,
     ConsensusScraper,
+    GENERIC_TARGET_ADAPTER,
+    OpenAIChatCompletionRequest,
+    SessionCreateRequest,
+    _chat_request_from_anthropic,
+    _chat_request_from_openai,
+    _extract_text_from_message_content,
+    _last_user_message,
     SessionManager,
+    sessions,
+    resolve_target_adapter,
 )
 
 
@@ -35,6 +48,7 @@ def test_chat_request_defaults():
     assert req.headless is False
     assert req.solve_captcha is True
     assert req.target_url is None
+    assert req.session_link is None
 
 
 def test_chat_request_custom():
@@ -80,6 +94,64 @@ def test_browser_chat_profile_uses_request_overrides():
     assert profile.response_selectors == ["article"]
     assert profile.source_selectors == ["a[href^='https://']"]
     assert profile.submit_selectors == ["button[type='submit']"]
+
+
+def test_browser_chat_profile_uses_session_link_as_target():
+    req = ChatRequest(message="hello", session_link="https://example.com/conversation/123")
+    profile = BrowserChatProfile.from_request(req)
+    assert profile.target_url == "https://example.com/conversation/123"
+    assert profile.adapter is GENERIC_TARGET_ADAPTER
+
+
+def test_session_create_request_to_chat_request():
+    req = SessionCreateRequest(session_link="https://example.com/chat/1", target_url="https://ignored.example.com")
+    chat_request = req.to_chat_request()
+    assert chat_request.session_link == "https://example.com/chat/1"
+    assert chat_request.target_url == "https://ignored.example.com"
+
+
+def test_extract_text_from_message_content():
+    assert _extract_text_from_message_content("hello") == "hello"
+    assert _extract_text_from_message_content([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "a\nb"
+
+
+def test_last_user_message_uses_last_user_turn():
+    messages = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ignore"},
+        {"role": "user", "content": [{"type": "text", "text": "second"}]},
+    ]
+    assert _last_user_message(messages) == "second"
+
+
+def test_openai_request_bridge():
+    req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], session_link="https://x")
+    chat_request = _chat_request_from_openai(req)
+    assert chat_request.message == "hello"
+    assert chat_request.session_link == "https://x"
+
+
+def test_anthropic_request_bridge():
+    req = AnthropicMessagesRequest(messages=[{"role": "user", "content": "hello"}], session_id="abc")
+    chat_request = _chat_request_from_anthropic(req)
+    assert chat_request.message == "hello"
+    assert chat_request.session_id == "abc"
+
+
+def test_browser_chat_profile_uses_consensus_adapter_by_default():
+    profile = BrowserChatProfile.from_request(ChatRequest(message="hello"))
+    assert profile.adapter.name == "consensus"
+
+
+def test_resolve_target_adapter_falls_back_to_generic():
+    adapter = resolve_target_adapter("https://example.com/chat")
+    assert adapter is GENERIC_TARGET_ADAPTER
+    assert isinstance(adapter, BrowserTargetAdapter)
+
+
+def test_resolve_target_adapter_for_consensus_url():
+    adapter = resolve_target_adapter("https://consensus.app/search/")
+    assert adapter is CONSENSUS_TARGET_ADAPTER
 
 
 # ==================== BrowserTab Tests ====================
@@ -245,7 +317,8 @@ async def test_session_manager_new_request_does_not_reuse_idle_session():
 
 @pytest.mark.asyncio
 async def test_blocking_page_detection():
-    scraper = ConsensusScraper(SessionManager())
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x"))
     page = AsyncMock()
     page.title = AsyncMock(return_value="Just a moment...")
     body_locator = MagicMock()
@@ -253,12 +326,13 @@ async def test_blocking_page_detection():
     page.locator = MagicMock(return_value=body_locator)
 
     with pytest.raises(BlockingPageError):
-        await scraper._assert_not_blocked(page, "playwright")
+        await scraper._assert_not_blocked(page, "playwright", profile)
 
 
 @pytest.mark.asyncio
 async def test_blocking_completion_detection_from_cloudflare_sources():
-    scraper = ConsensusScraper(SessionManager())
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x"))
     page = AsyncMock()
     page.title = AsyncMock(return_value="")
     body_locator = MagicMock()
@@ -271,12 +345,14 @@ async def test_blocking_completion_detection_from_cloudflare_sources():
             [{"title": "Cloudflare", "url": "https://www.cloudflare.com"}],
             page,
             "playwright",
+            profile,
         )
 
 
 @pytest.mark.asyncio
 async def test_empty_completion_detection_for_non_chat_page():
-    scraper = ConsensusScraper(SessionManager())
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x"))
     page = AsyncMock()
     page.title = AsyncMock(return_value="Consensus")
     body_locator = MagicMock()
@@ -284,12 +360,13 @@ async def test_empty_completion_detection_for_non_chat_page():
     page.locator = MagicMock(return_value=body_locator)
 
     with pytest.raises(RuntimeError):
-        await scraper._assert_valid_completion("", [], page, "playwright")
+        await scraper._assert_valid_completion("", [], page, "playwright", profile)
 
 
 @pytest.mark.asyncio
 async def test_auth_wall_detection():
-    scraper = ConsensusScraper(SessionManager())
+    scraper = BrowserChatScraper(SessionManager())
+    profile = BrowserChatProfile.from_request(ChatRequest(message="x"))
     page = AsyncMock()
     page.title = AsyncMock(return_value="Sign Up - Consensus: AI Search Engine for Research")
     page.url = "https://consensus.app/sign-up/?redirect_url=%2F"
@@ -298,7 +375,7 @@ async def test_auth_wall_detection():
     page.locator = MagicMock(return_value=body_locator)
 
     with pytest.raises(AuthenticationRequiredError):
-        await scraper._assert_not_blocked(page, "playwright")
+        await scraper._assert_not_blocked(page, "playwright", profile)
 
 
 @pytest.mark.asyncio
@@ -315,17 +392,23 @@ async def test_captcha_handler_skips_normal_results_page():
 
 
 def test_skip_placeholder_response_text():
-    scraper = ConsensusScraper(SessionManager())
-    assert scraper._should_skip_response_text("Results\n\nNEW\n—\n·\n·\n·") is True
-    assert scraper._should_skip_response_text("Real answer text with actual alphabetic content and citations 1 2 3.") is False
+    scraper = BrowserChatScraper(SessionManager())
+    assert scraper._should_skip_response_text("Results\n\nNEW\n—\n·\n·\n·", CONSENSUS_TARGET_ADAPTER) is True
+    assert scraper._should_skip_response_text(
+        "Real answer text with actual alphabetic content and citations 1 2 3.",
+        CONSENSUS_TARGET_ADAPTER,
+    ) is False
 
 
 def test_same_turn_detection():
-    scraper = ConsensusScraper(SessionManager())
     previous = "Caffeine typically reduces sleep quantity and depth."
-    assert scraper._looks_like_same_turn(previous, previous) is True
-    assert scraper._looks_like_same_turn(previous, "Caffeine typically reduces sleep quantity and depth. More detail.") is True
-    assert scraper._looks_like_same_turn(previous, "Adolescent caffeine use is associated with shorter sleep.") is False
+    assert CONSENSUS_TARGET_ADAPTER.looks_like_same_turn(previous, previous) is True
+    assert CONSENSUS_TARGET_ADAPTER.looks_like_same_turn(
+        previous, "Caffeine typically reduces sleep quantity and depth. More detail."
+    ) is True
+    assert CONSENSUS_TARGET_ADAPTER.looks_like_same_turn(
+        previous, "Adolescent caffeine use is associated with shorter sleep."
+    ) is False
 
 
 # ==================== API Endpoint Tests ====================
@@ -399,6 +482,161 @@ def test_chat_sync_endpoint():
             assert data["content"] == "Hello world"
             assert len(data["sources"]) == 1
             assert data["target_url"] == DEFAULT_TARGET_URL
+            assert "session_link" in data
+
+
+def test_create_session_endpoint():
+    with TestClient(app) as client:
+        fake_page = AsyncMock()
+        fake_tab = BrowserTab(
+            session_id="sess1",
+            page=fake_page,
+            browser_type="playwright",
+            target_url="https://example.com/chat",
+            current_url="https://example.com/chat/1",
+            in_use=True,
+        )
+        with patch.object(sessions, "get_session", AsyncMock(return_value=fake_tab)):
+            resp = client.post("/v1/sessions", json={"target_url": "https://example.com/chat"})
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["session_id"] == "sess1"
+            assert data["session_link"] == "https://example.com/chat/1"
+
+
+def test_list_sessions_endpoint():
+    with TestClient(app) as client:
+        fake_page = AsyncMock()
+        fake_tab = BrowserTab(
+            session_id="sess2",
+            page=fake_page,
+            browser_type="playwright",
+            target_url="https://example.com/chat",
+            current_url="https://example.com/chat/2",
+            in_use=False,
+        )
+        original_sessions = sessions.sessions
+        sessions.sessions = {"sess2": fake_tab}
+        try:
+            resp = client.get("/v1/sessions")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["object"] == "list"
+            assert data["data"][0]["session_id"] == "sess2"
+        finally:
+            sessions.sessions = original_sessions
+
+
+def test_get_session_endpoint_404():
+    with TestClient(app) as client:
+        resp = client.get("/v1/sessions/missing")
+        assert resp.status_code == 404
+
+
+def test_openai_chat_completions_sync_endpoint():
+    with TestClient(app) as client:
+        with patch.object(
+            BrowserChatScraper,
+            "chat",
+            return_value=_async_gen([
+                json.dumps({
+                    "type": "complete",
+                    "content": "Hello world",
+                    "sources": [],
+                    "session_id": "sess3",
+                    "session_link": "https://example.com/chat/3",
+                    "target_url": "https://example.com/chat",
+                }),
+            ]),
+        ):
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "browser-chat", "messages": [{"role": "user", "content": "hello"}]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["object"] == "chat.completion"
+            assert data["choices"][0]["message"]["content"] == "Hello world"
+            assert data["session_id"] == "sess3"
+
+
+def test_openai_chat_completions_stream_endpoint():
+    with TestClient(app) as client:
+        with patch.object(
+            BrowserChatScraper,
+            "chat",
+            return_value=_async_gen([
+                json.dumps({"type": "delta", "content": "Hello ", "session_id": "sess4"}),
+                json.dumps({
+                    "type": "complete",
+                    "content": "Hello world",
+                    "sources": [],
+                    "session_id": "sess4",
+                    "session_link": "https://example.com/chat/4",
+                }),
+            ]),
+        ):
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "browser-chat", "stream": True, "messages": [{"role": "user", "content": "hello"}]},
+            )
+            assert resp.status_code == 200
+            assert "text/event-stream" in resp.headers["content-type"]
+            assert "chat.completion.chunk" in resp.text
+            assert "[DONE]" in resp.text
+
+
+def test_anthropic_messages_sync_endpoint():
+    with TestClient(app) as client:
+        with patch.object(
+            BrowserChatScraper,
+            "chat",
+            return_value=_async_gen([
+                json.dumps({
+                    "type": "complete",
+                    "content": "Hi there",
+                    "sources": [],
+                    "session_id": "sess5",
+                    "session_link": "https://example.com/chat/5",
+                    "target_url": "https://example.com/chat",
+                }),
+            ]),
+        ):
+            resp = client.post(
+                "/v1/messages",
+                json={"model": "browser-chat", "messages": [{"role": "user", "content": "hello"}]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["type"] == "message"
+            assert data["content"][0]["text"] == "Hi there"
+            assert data["session_id"] == "sess5"
+
+
+def test_anthropic_messages_stream_endpoint():
+    with TestClient(app) as client:
+        with patch.object(
+            BrowserChatScraper,
+            "chat",
+            return_value=_async_gen([
+                json.dumps({"type": "delta", "content": "Hi ", "session_id": "sess6"}),
+                json.dumps({
+                    "type": "complete",
+                    "content": "Hi there",
+                    "sources": [],
+                    "session_id": "sess6",
+                    "session_link": "https://example.com/chat/6",
+                }),
+            ]),
+        ):
+            resp = client.post(
+                "/v1/messages",
+                json={"model": "browser-chat", "stream": True, "messages": [{"role": "user", "content": "hello"}]},
+            )
+            assert resp.status_code == 200
+            assert "text/event-stream" in resp.headers["content-type"]
+            assert "message_start" in resp.text
+            assert "message_stop" in resp.text
 
 
 # ==================== Helpers ====================
