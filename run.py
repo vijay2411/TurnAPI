@@ -12,10 +12,16 @@ DEFAULT_BROWSER_PROFILE_DIR = Path(
     os.getenv("BROWSER_CHAT_PROFILE_DIR", Path(__file__).resolve().parent / ".browser-profile")
 ).resolve()
 DEFAULT_BROWSER_CDP_PORT = os.getenv("BROWSER_CHAT_CDP_PORT", "9222")
-DEFAULT_LOCAL_CHROME_USER_DATA_DIR = Path(
-    os.getenv("BROWSER_CHAT_CHROME_USER_DATA_DIR", Path.home() / "Library/Application Support/Google/Chrome")
+DEFAULT_BROWSER_APP_NAME = os.getenv("BROWSER_CHAT_BROWSER_APP", "Brave Browser").strip()
+DEFAULT_BROWSER_WINDOW_MODE = os.getenv("BROWSER_CHAT_WINDOW_MODE", "background").strip().lower()
+DEFAULT_LOCAL_BROWSER_USER_DATA_DIR = Path(
+    os.getenv("BROWSER_CHAT_CHROME_USER_DATA_DIR", _default_user_data_dir := (
+        Path.home() / "Library/Application Support/BraveSoftware/Brave-Browser"
+        if DEFAULT_BROWSER_APP_NAME == "Brave Browser"
+        else Path.home() / "Library/Application Support/Google/Chrome"
+    ))
 ).resolve()
-DEFAULT_LOCAL_CHROME_PROFILE_DIRECTORY = os.getenv("BROWSER_CHAT_CHROME_PROFILE_DIRECTORY", "Default").strip()
+DEFAULT_LOCAL_BROWSER_PROFILE_DIRECTORY = os.getenv("BROWSER_CHAT_CHROME_PROFILE_DIRECTORY", "Default").strip()
 
 
 def setup():
@@ -42,7 +48,9 @@ def _chrome_executable():
     chrome_path = os.getenv("BROWSER_CHAT_CHROME_PATH", "").strip()
     candidates = [
         chrome_path,
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        shutil.which("brave-browser"),
         shutil.which("google-chrome"),
         shutil.which("chromium"),
         shutil.which("chromium-browser"),
@@ -52,10 +60,17 @@ def _chrome_executable():
 
 def _chrome_launch_command(args: list[str]) -> list[str]:
     if sys.platform == "darwin":
-        return ["open", "-na", "Google Chrome", "--args", *args]
+        flags = ["-n"]
+        if DEFAULT_BROWSER_WINDOW_MODE in {"background", "offscreen", "hidden"}:
+            flags.extend(["-g", "-j"])
+        return ["open", *flags, "-a", DEFAULT_BROWSER_APP_NAME, "--args", *args]
     executable = _chrome_executable()
     if not executable:
         return []
+    if DEFAULT_BROWSER_WINDOW_MODE in {"background", "minimized"}:
+        args = [*args, "--start-minimized"]
+    if DEFAULT_BROWSER_WINDOW_MODE == "offscreen":
+        args = [*args, "--window-position=-2400,0", "--window-size=1280,900"]
     return [executable, *args]
 
 
@@ -66,32 +81,40 @@ def launch_debug_browser(use_local_profile: bool = False):
         sys.exit(1)
 
     if use_local_profile:
-        if not DEFAULT_LOCAL_CHROME_USER_DATA_DIR.exists():
-            print(f"❌ Chrome user data dir not found: {DEFAULT_LOCAL_CHROME_USER_DATA_DIR}")
+        if not DEFAULT_LOCAL_BROWSER_USER_DATA_DIR.exists():
+            print(f"❌ Browser user data dir not found: {DEFAULT_LOCAL_BROWSER_USER_DATA_DIR}")
             sys.exit(1)
-        cmd = _chrome_launch_command(
-            [
+        args = [
             f"--remote-debugging-port={DEFAULT_BROWSER_CDP_PORT}",
-            f"--user-data-dir={DEFAULT_LOCAL_CHROME_USER_DATA_DIR}",
-            f"--profile-directory={DEFAULT_LOCAL_CHROME_PROFILE_DIRECTORY}",
+            f"--user-data-dir={DEFAULT_LOCAL_BROWSER_USER_DATA_DIR}",
+            f"--profile-directory={DEFAULT_LOCAL_BROWSER_PROFILE_DIRECTORY}",
             DEFAULT_TARGET_URL,
-            ]
-        )
-        print("Launching Chrome debug session with local profile...")
-        print(f"user-data-dir={DEFAULT_LOCAL_CHROME_USER_DATA_DIR}")
-        print(f"profile-directory={DEFAULT_LOCAL_CHROME_PROFILE_DIRECTORY}")
-        print("If Chrome is already running on this profile, fully quit it first.")
+        ]
+        if DEFAULT_BROWSER_WINDOW_MODE == "offscreen":
+            args.extend(["--window-position=-2400,0", "--window-size=1280,900"])
+        elif DEFAULT_BROWSER_WINDOW_MODE in {"background", "minimized"}:
+            args.append("--start-minimized")
+        cmd = _chrome_launch_command(args)
+        print(f"Launching {DEFAULT_BROWSER_APP_NAME} debug session with local profile...")
+        print(f"user-data-dir={DEFAULT_LOCAL_BROWSER_USER_DATA_DIR}")
+        print(f"profile-directory={DEFAULT_LOCAL_BROWSER_PROFILE_DIRECTORY}")
+        print(f"window-mode={DEFAULT_BROWSER_WINDOW_MODE}")
+        print(f"If {DEFAULT_BROWSER_APP_NAME} is already running on this profile, fully quit it first.")
     else:
         DEFAULT_BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        cmd = _chrome_launch_command(
-            [
+        args = [
             f"--remote-debugging-port={DEFAULT_BROWSER_CDP_PORT}",
             f"--user-data-dir={DEFAULT_BROWSER_PROFILE_DIR}",
             DEFAULT_TARGET_URL,
-            ]
-        )
-        print("Launching Chrome debug session with dedicated profile...")
+        ]
+        if DEFAULT_BROWSER_WINDOW_MODE == "offscreen":
+            args.extend(["--window-position=-2400,0", "--window-size=1280,900"])
+        elif DEFAULT_BROWSER_WINDOW_MODE in {"background", "minimized"}:
+            args.append("--start-minimized")
+        cmd = _chrome_launch_command(args)
+        print(f"Launching {DEFAULT_BROWSER_APP_NAME} debug session with dedicated profile...")
         print(f"user-data-dir={DEFAULT_BROWSER_PROFILE_DIR}")
+        print(f"window-mode={DEFAULT_BROWSER_WINDOW_MODE}")
 
     print(" ".join(cmd))
     subprocess.Popen(cmd)

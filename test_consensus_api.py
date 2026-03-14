@@ -10,6 +10,7 @@ from consensus_api import (
     DEFAULT_BROWSER_CDP_URL,
     DEFAULT_BROWSER_MODE,
     DEFAULT_BROWSER_PROFILE_DIR,
+    DEFAULT_BROWSER_WINDOW_MODE,
     DEFAULT_SUBMIT_SELECTORS,
     DEFAULT_TARGET_URL,
     app,
@@ -341,6 +342,7 @@ def test_health_endpoint():
         assert data["default_target_url"] == DEFAULT_TARGET_URL
         assert data["browser_driver"] == DEFAULT_BROWSER_DRIVER
         assert data["browser_mode"] == DEFAULT_BROWSER_MODE
+        assert data["browser_window_mode"] == DEFAULT_BROWSER_WINDOW_MODE
         assert data["browser_profile_dir"] == DEFAULT_BROWSER_PROFILE_DIR
         assert data["browser_cdp_url"] == DEFAULT_BROWSER_CDP_URL
 

@@ -94,6 +94,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("BROWSER_CHAT_POLL_INTERVAL_SECO
 DEFAULT_STABLE_POLLS = int(os.getenv("BROWSER_CHAT_STABLE_POLLS", "3"))
 DEFAULT_BROWSER_DRIVER = os.getenv("BROWSER_CHAT_DRIVER", "playwright").strip().lower()
 DEFAULT_BROWSER_MODE = os.getenv("BROWSER_CHAT_MODE", "persistent").strip().lower()
+DEFAULT_BROWSER_WINDOW_MODE = os.getenv("BROWSER_CHAT_WINDOW_MODE", "background").strip().lower()
 DEFAULT_BROWSER_PROFILE_DIR = str(
     Path(os.getenv("BROWSER_CHAT_PROFILE_DIR", Path(__file__).resolve().parent / ".browser-profile")).resolve()
 )
@@ -375,12 +376,17 @@ class SessionManager:
         return self._playwright_browser.contexts[0]
 
     def _playwright_launch_args(self) -> list[str]:
-        return [
+        args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-web-security",
             "--disable-features=IsolateOrigins,site-per-process",
             "--window-size=1920,1080",
         ]
+        if DEFAULT_BROWSER_WINDOW_MODE == "offscreen":
+            args.extend(["--window-position=-2400,0"])
+        elif DEFAULT_BROWSER_WINDOW_MODE in {"background", "minimized"}:
+            args.extend(["--start-minimized"])
+        return args
 
     def _playwright_context_kwargs(self) -> dict[str, Any]:
         return {
@@ -1002,6 +1008,7 @@ async def health():
         "default_target_url": DEFAULT_TARGET_URL,
         "browser_driver": DEFAULT_BROWSER_DRIVER,
         "browser_mode": DEFAULT_BROWSER_MODE,
+        "browser_window_mode": DEFAULT_BROWSER_WINDOW_MODE,
         "browser_profile_dir": DEFAULT_BROWSER_PROFILE_DIR,
         "browser_cdp_url": DEFAULT_BROWSER_CDP_URL,
     }
